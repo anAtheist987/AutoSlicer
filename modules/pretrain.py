@@ -181,6 +181,41 @@ class TransformerBlock(nn.Module):
         return x
 
 
+class Quantizer(nn.Module):
+    def __init__(
+            self, in_channel: int, out_channel: int, group=2, entry=320,
+    ):
+        super(Quantizer, self).__init__()
+        assert out_channel % group == 0
+        self.codebooks: nn.ModuleList[nn.Embedding] = nn.ModuleList(
+            [nn.Embedding(entry, out_channel // group) for _ in range(group)]
+        )
+        self.weight_proj = nn.Linear(in_channel, group * entry)
+        self.proj_q = nn.Linear(out_channel, out_channel)
+
+    def forward(self, x: torch.Tensor):
+        """
+
+        Parameters
+        ----------
+        x: [..., C]
+
+        Returns
+        -------
+
+        """
+        x = self.weight_proj(x)  # [..., entry*group]
+        x = nn.functional.gumbel_softmax(x, 1., hard=False, dim=-1)
+
+        code_part = torch.chunk(x, len(self.codebooks), -1)  # list[..., entry]
+        code_part = [
+            part @ codebook.weight
+            for part, codebook in zip(code_part, self.codebooks)
+        ]  # list[..., Cout//group]
+        x = torch.cat(code_part, -1)  # [..., Cout]
+        return x
+
+
 def make_mask(batch: int, length: int, p=0.2, l=2) -> torch.BoolTensor:
     """
 
@@ -209,12 +244,15 @@ class ContextPredictor(Slicer):
             res_num: Union[int, Sequence[int]] = 1,
             down_sample_scale: Union[int, Sequence[int]] = 3,
             context_channel=192, context_num_layers=4, context_num_heads=4,
-            out_ch=1,
+            codebook_group=2, codebook_entry=320,
+            out_ch=128,
     ):
         super(ContextPredictor, self).__init__(
             channels=channels, groups=groups, res_num=res_num, down_sample_scale=down_sample_scale,
             context_channel=context_channel, context_num_layers=0, out_ch=out_ch,
         )
+
+        self.quantizer = Quantizer(channels[-1], out_channel=out_ch, group=codebook_group, entry=codebook_entry)
 
         self.pre_extract = nn.Linear(channels[-1], context_channel)
         self.masked_code = nn.Parameter(torch.randn(context_channel))
@@ -234,25 +272,26 @@ class ContextPredictor(Slicer):
 
     def forward(self, x, target):
 
-        z = self.encoder(x)  # [N, L] -> [N, C, Lout]
+        latent = self.encoder(x)  # [N, L] -> [N, C, Lout]
+        latent = latent.transpose(1, 2)  # [N, C, L] -> [N, L, C]
+        mask = make_mask(*latent.shape[0:2], p=0.2, l=0.2)  # [N, L]
 
-        # TODO: quantize
+        q = latent[mask]  # [Lmask, C]
+        q = self.quantizer(q)
+        # TODO: quantize loss
 
-        z = z.transpose(1, 2)  # [N, C, Lout] -> [N, Lout, C]
+        c = self.pre_extract(latent)
+        c = c * ~mask[..., None] + self.masked_code * mask[..., None]
 
-        z = self.pre_extract(z)
-        mask = make_mask(*z.shape[0:2], p=0.2, l=0.2)
-        z = z * ~mask[..., None] + self.masked_code * mask[..., None]
+        c = c.transpose(1, 2)  # [N, L, C] -> [N, C, L]
+        c = self.pos_emb(c)
+        c = c.transpose(1, 2)  # [N, C, L] -> [N, L, C]
 
-        z = z.transpose(1, 2)  # [N, Lout, C] -> [N, C, Lout]
-        z = self.pos_emb(z)
-        z = z.transpose(1, 2)  # [N, C, Lout] -> [N, Lout, C]
+        c = self.context_model(c)
 
-        z = self.context_model(z)
+        c = self.head(c)
 
-        z = self.head(z)
-
-        return z  # TODO: loss
+        return c  # TODO: loss
 
 
 def predictor_small():
