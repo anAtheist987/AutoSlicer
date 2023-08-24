@@ -300,5 +300,6 @@ def predictor_small():
         res_num=(1,) * 7, down_sample_scale=3,
         groups=(4, 4, 6, 6, 8, 8, 8),
         context_channel=512, context_num_layers=8, context_num_heads=8,
-        out_ch=256,
+        codebook_group=2, codebook_entry=192,
+        out_ch=160,
     )
