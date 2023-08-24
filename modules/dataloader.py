@@ -1,22 +1,20 @@
-from typing import Iterator
+from typing import Iterator, Optional
 
 import torch
 
 import librosa
 import soundfile
 
-
-
 from torch.utils.data import Dataset
 from pathlib import Path
 
 
 # read all .wav files under data_path
-def scanner(path: Path, suffix=".wav"):
+def scanner(path: Path):
     for i in path.iterdir():
         if i.is_dir():
             yield from scanner(i)
-        elif i.is_file() and i.suffix == suffix:
+        elif i.is_file():
             yield i
 
 
@@ -68,9 +66,11 @@ class AudioDataset(Dataset):
     def __len__(self):
         return self.index_num
 
-    def __init__(self, sample_rate=8000, split_size=4 * 60 * 8000, front_overlap=2 * 60 * 8000,
-                 back_overlap=2 * 60 * 8000,
-                 data_path=Path("D:\\课程 2023暑假\\数据集\\")):
+    def __init__(
+            self, sample_rate=8000,
+            split_size=4 * 60 * 8000, front_overlap=2 * 60 * 8000, back_overlap=2 * 60 * 8000,
+            data_path=Path("D:\\课程 2023暑假\\数据集\\"), data_suffix: Optional[str] = ".wav",
+    ):
         self.split_size = split_size
         self.chunk_size = split_size + front_overlap + back_overlap
         self.data_path = data_path
@@ -79,14 +79,13 @@ class AudioDataset(Dataset):
         self.split_list = []
 
         for path in scanner(data_path):
-            info = soundfile.info(str(path))
-            if info.samplerate != self.sample_rate:
-                continue
-            split_num = (info.frames -
-                         (front_overlap + back_overlap)) // split_size
-            split_num = int(split_num)
-            self.index_num += split_num
-            self.split_list.append((path, split_num))
-
-
-
+            if data_suffix is None or data_path.suffix == data_suffix:
+                info = soundfile.info(str(path))
+                if info.samplerate != self.sample_rate:
+                    print(f"Skipped file not satisfying sample rate: {path}")
+                    continue
+                split_num = (info.frames -
+                             (front_overlap + back_overlap)) // split_size
+                split_num = int(split_num)
+                self.index_num += split_num
+                self.split_list.append((path, split_num))
