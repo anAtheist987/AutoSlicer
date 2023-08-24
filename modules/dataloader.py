@@ -64,3 +64,7 @@ class AudioDataset(Dataset):
                 split_num = int(split_num)
                 self.index_num += split_num
                 self.split_list.append((path, split_num))
+
+
+class PretrainAudio(AudioDataset):
+    pass  # TODO: 实现随机取负样本

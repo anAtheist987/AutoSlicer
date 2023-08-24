@@ -223,7 +223,7 @@ class PreTrainer(Trainer):
         self.val_interval = val_interval
         self.save_interval = save_interval
 
-    def train(self, start_step=None):
+    def train(self, start_step=None):  # TODO: 针对pretrain的代码
         step = start_step
         if start_step is None:
             step = self.start_step
@@ -293,7 +293,7 @@ class SlicerTrainer(Trainer):
             self, *args,
             print_interval=10,
             val_interval=100,
-            save_interval=2000,
+            save_interval=200,
             **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -301,7 +301,7 @@ class SlicerTrainer(Trainer):
         self.val_interval = val_interval
         self.save_interval = save_interval
 
-    def train(self, start_step=None):
+    def train(self, start_step=None):  # TODO: 针对fine-tune的代码
         step = start_step
         if start_step is None:
             step = self.start_step
@@ -361,6 +361,7 @@ class SlicerTrainer(Trainer):
 
                     # save model
                     if step % self.save_interval == 0:
+                        self.save_model(self.model_path.parent / f"{step}.pkl")
                         self.save()
 
                 step += 1

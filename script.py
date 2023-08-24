@@ -9,7 +9,7 @@ def pretrain():
     pass  # TODO: pretrain script
 
 
-def train():
+def train():  # TODO: 迁移pretrain模型
     device = torch.device("cuda")
     load_model = False
     log_dir = r'.\logs'
