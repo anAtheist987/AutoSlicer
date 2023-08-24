@@ -1,7 +1,7 @@
 import torch
 
 from modules.trainer import SlicerTrainer
-from modules.model import Slicer
+from modules.model import slicer_small
 from modules.dataloader import AudioDataset
 
 if __name__ == '__main__':
@@ -17,12 +17,7 @@ if __name__ == '__main__':
     sample_rate = 8000
     duration = 5 * 60
 
-    net = Slicer(
-        channels=(32, 48, 72, 108, 160, 224, 320),  # down sample 6 times (128ms in 16k SR)
-        res_num=(1,) * 7,
-        out_ch=1,
-        rnn_channel=320,
-    ).to(device)
+    net = slicer_small().to(device)
     # net.stem.requires_grad_(False)
     # net.down_samples.requires_grad_(False)
     optimizer = torch.optim.AdamW(net.parameters(), 1e-4)

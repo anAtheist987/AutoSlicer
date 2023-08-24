@@ -21,9 +21,9 @@ def zero_module(module: torch.nn.Module):
     return module
 
 
-class ResBlk(nn.Module):
-    def __init__(self, in_ch, out_ch=None, kernel_size=3, padding: Union[str, int] = 'same'):
-        super(ResBlk, self).__init__()
+class ResNeXtBlk(nn.Module):
+    def __init__(self, in_ch, out_ch=None, kernel_size=3, padding: Union[str, int] = 'same', groups=4):
+        super(ResNeXtBlk, self).__init__()
 
         if out_ch is None:
             out_ch = in_ch
@@ -31,13 +31,13 @@ class ResBlk(nn.Module):
         self.layers = nn.Sequential(
             normalization(in_ch),
             activation(),
-            nn.Conv1d(in_ch, out_ch // 4, kernel_size=1, padding=0),
-            normalization(out_ch // 4),
+            nn.Conv1d(in_ch, out_ch // 2, kernel_size=1, padding=0),
+            normalization(out_ch // 2),
             activation(),
-            nn.Conv1d(out_ch // 4, out_ch // 4, kernel_size=kernel_size, padding=padding),
-            normalization(out_ch // 4),
+            nn.Conv1d(out_ch // 2, out_ch // 2, kernel_size=kernel_size, padding=padding, groups=groups),
+            normalization(out_ch // 2),
             activation(),
-            nn.Conv1d(out_ch // 4, out_ch, kernel_size=1, padding=0),
+            nn.Conv1d(out_ch // 2, out_ch, kernel_size=1, padding=0),
 
         )
 
@@ -46,8 +46,8 @@ class ResBlk(nn.Module):
     def forward(self, x):
         """
 
-        :param x: [B, Cin, L]
-        :return: [B, Cout, L]
+        :param x: [N, Cin, L]
+        :return: [N, Cout, L]
         """
         shortcut = x
         x = self.layers(x)
@@ -64,10 +64,6 @@ class BiGRU(nn.Module):
     def forward(self, x):
         x, _ = self.rnn(x)
         return x
-
-
-class TransBlk(nn.Module):
-    pass
 
 
 class SincConvFast(nn.Module):
@@ -159,7 +155,7 @@ class SincConvFast(nn.Module):
 
         self.filter_type = filter_type
 
-    def forward(self, waveforms):
+    def forward(self, waveforms: torch.Tensor):
         """
         Parameters
         ----------
@@ -216,7 +212,7 @@ class SincConvFast(nn.Module):
             self.out_channels, 1, 1, self.kernel_size)
         return filters
 
-    def band_pass(self, waveforms):
+    def band_pass(self, waveforms: torch.Tensor):
         """
         Parameters
         ----------
@@ -290,29 +286,35 @@ class SincConvFast(nn.Module):
 class Encoder(nn.Module):
     def __init__(
             self,
-            channels: Sequence[int] = (32, 48, 72, 96, 128, 160, 192),  # down sample 6 times (256ms in 16k SR)
-            res_num=(1,) * 7,
+            channels: Sequence[int] = (32, 48, 72, 96, 128, 160, 192),
+            group: Union[int, Sequence[int]] = 8,
+            res_num=(1,) * 7, down_sample_scale=3,
     ):
         super(Encoder, self).__init__()
 
         self.stem = SincConvFast(out_channels=channels[0], kernel_size=65, padding='same', sample_rate=8000)
 
+        if isinstance(group, int):
+            group = (group,) * len(channels)
         self.down_samples = nn.ModuleList()
         for i in range(len(channels)):
             layer = nn.Sequential(
-                *([ResBlk(channels[i], kernel_size=5)] * res_num[i])
+                *([ResNeXtBlk(channels[i], kernel_size=5, groups=group[i])] * res_num[i])
             )
             if i < len(channels) - 1:
-                layer.append(nn.Conv1d(channels[i], channels[i + 1], kernel_size=3, stride=3))
+                layer.append(nn.Conv1d(
+                    channels[i], channels[i + 1],
+                    kernel_size=down_sample_scale, stride=down_sample_scale,
+                ))
             self.down_samples.append(layer)
 
     def forward(self, x):
         """
-        :param x: [B, L]
-        :return: [B, C, L // 2 ** 12]
+        :param x: [N, L]
+        :return: [N, C, L // scale ** (layer_num - 1)]
         """
 
-        x = x[:, None, :]  # [B, 1, L]
+        x = x[:, None, :]  # [N, 1, L]
 
         x = self.stem(x)
 
@@ -332,13 +334,14 @@ class Slicer(nn.Module):
     def __init__(
             self,
             channels: Sequence[int] = (32, 48, 72, 96, 128, 160, 192),  # down sample 6 times (256ms in 16k SR)
-            res_num=(1,) * 7,
+            group: Union[int, Sequence[int]] = 8,
+            res_num=(1,) * 7, down_sample_scale=3,
             out_ch=1,
             rnn_channel=192,
     ):
         super(Slicer, self).__init__()
 
-        self.encoder = Encoder(channels=channels, res_num=res_num)
+        self.encoder = Encoder(channels=channels, res_num=res_num, group=group, down_sample_scale=down_sample_scale)
 
         self.gru = BiGRU(channels[-1], rnn_channel // 2, dropout=0.2, num_layers=4)
 
@@ -350,17 +353,17 @@ class Slicer(nn.Module):
 
     def forward(self, x, label):
         """
-        :param x: [B, L]
-        :param label: [B, L]
-        :return: [B, Cout, L]
+        :param x: [N, L]
+        :param label: [N, L // scale ** (layer_num - 1)]
+        :return: [N, Cout, L // scale ** (layer_num - 1)]
         """
 
-        x = self.encoder(x)  # [B, L] -> [B, C, L]
+        x = self.encoder(x)  # [N, L] -> [N, C, Lout]
 
-        x = x.permute(0, 2, 1)  # [B, C, L] -> [B, L, C]
+        x = x.permute(0, 2, 1)  # [N, C, Lout] -> [N, Lout, C]
         x = self.gru(x)
 
-        x = x.permute(0, 2, 1)  # [B, L, C] -> [B, C, L]
+        x = x.permute(0, 2, 1)  # [N, Lout, C] -> [N, C, Lout]
         x = self.head(x)
 
         return torch.nn.functional.binary_cross_entropy_with_logits(x, label)
@@ -382,3 +385,12 @@ class Pretrain(nn.Module):
 
         )
 
+
+def slicer_small():
+    return Slicer(
+        channels=(32, 48, 72, 108, 160, 224, 320),  # down sample 6 times (128ms in 16k SR)
+        res_num=(1,) * 7,
+        group=(4, 4, 6, 9, 10, 14, 16),
+        out_ch=1,
+        rnn_channel=320,
+    )
