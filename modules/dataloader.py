@@ -1,8 +1,7 @@
-from typing import Iterator, Optional
+from typing import Optional
 
 import torch
 
-import librosa
 import soundfile
 
 from torch.utils.data import Dataset
@@ -18,49 +17,25 @@ def scanner(path: Path):
             yield i
 
 
-'''
-写下来以免明天忘了：
-啥比更新……load发黄是因为更新后torchaudio会在运行过程中才将backend里的load，info等函数加进来
-因此目前得用torchaudio.backend.load()才不会发黄
-附上代码：
-
-def _init_audio_backend():
-    backends = list_audio_backends()
-    if "sox_io" in backends:
-        set_audio_backend("sox_io")
-    elif "soundfile" in backends:
-        set_audio_backend("soundfile")
-    else:
-        warnings.warn("No audio backend is available.")
-        set_audio_backend(None)
-        
-        
-if _is_backend_dispatcher_enabled():
-    from torchaudio._backend.utils import get_info_func, get_load_func, get_save_func
-
-    torchaudio.info = get_info_func()
-    torchaudio.load = get_load_func()
-    torchaudio.save = get_save_func()
-else:
-    utils._init_audio_backend()
-    
-
-'''
-
-
 class AudioDataset(Dataset):
+    """
+    A Dataset to read audio
+    """
+
     def __getitem__(self, index):
-        path = None
         for path, num in self.split_list:
             if index >= num:
                 index -= num
             else:
                 path = str(path)
                 break
-        chunk = librosa.load(path, sr=self.sample_rate, mono=True,
-                             offset=index * (self.split_size / self.sample_rate),
-                             duration=self.chunk_size / self.sample_rate)
-        wf = torch.tensor(chunk[0])
+        else:
+            raise IndexError("index out of dataset total slices")
+        chunk, sr = soundfile.read(path, frames=self.chunk_size, start=index * self.split_size, dtype="float32")  # TODO: 改成了soundfile，未验证
+        assert sr == self.sample_rate
+        if len(chunk.shape) > 1:
+            chunk = chunk.mean(-1)  # l,c -> l
+        wf = torch.from_numpy(chunk)
         return wf
 
     def __len__(self):

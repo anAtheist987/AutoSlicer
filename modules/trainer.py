@@ -11,10 +11,6 @@ from torch.utils.tensorboard import SummaryWriter
 
 PathLike = Union[Path, str]
 
-__all__ = [
-    "Trainer",
-]
-
 T = TypeVar("T")
 
 
@@ -214,6 +210,84 @@ class Trainer:
         self.close()
 
 
+class PreTrainer(Trainer):
+    def __init__(
+            self, *args,
+            print_interval=10,
+            val_interval=100,
+            save_interval=2000,
+            **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.print_interval = print_interval
+        self.val_interval = val_interval
+        self.save_interval = save_interval
+
+    def train(self, start_step=None):
+        step = start_step
+        if start_step is None:
+            step = self.start_step
+            if self.start_step is None:
+                step = 0
+
+        while True:
+            for audios, labels, *_ in self.train_dataloader:
+                if self.step_num is not None and step >= self.step_num:
+                    return
+
+                audios = audios.to(self.device)
+                labels = labels.to(self.device)
+
+                self.optimizer.zero_grad()
+                self.model.train()
+
+                with get_autocast(self.device):
+                    loss = self.model.forward(audios, labels)
+
+                if self.scaler is None:
+                    loss.backward()
+                    loss = loss.detach().item()
+                    self.optimizer.step()
+                else:
+                    self.scaler.scale(loss).backward()
+                    loss = loss.detach().item()
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+
+                if self.lr_scheduler is not None:
+                    self.lr_scheduler.step()
+
+                # print loss state
+                if step % self.print_interval == 0:
+                    print(f"step: {step}, loss: {loss}")
+
+                # do record
+                if self.writer is not None:
+                    # record loss state
+                    self.writer.add_scalars("loss", {"train": loss}, step)
+
+                    # do validation and record
+                    if step % self.val_interval == 0 and self.valid_dataloader is not None:
+                        self.model.eval()
+                        with torch.no_grad():
+                            audios, labels, *_ = self.valid_dataloader.__iter__().__next__()
+                            audios = audios.to(self.device)
+                            labels = labels.to(self.device)
+                            with get_autocast(self.device):
+                                loss = self.model.forward(audios, labels)
+                            loss = loss.detach().item()
+
+                            self.writer.add_scalars("loss", {"valid": loss}, step)
+
+                        print(f"step: {step}, valid loss: {loss}")
+
+                    # save model
+                    if step % self.save_interval == 0:
+                        self.save()
+
+                step += 1
+
+
 class SlicerTrainer(Trainer):
     def __init__(
             self, *args,
@@ -268,7 +342,7 @@ class SlicerTrainer(Trainer):
                 # do record
                 if self.writer is not None:
                     # record loss state
-                    self.writer.add_scalars("ddpm/loss", {"train": loss}, step)
+                    self.writer.add_scalars("loss", {"train": loss}, step)
 
                     # do validation and record
                     if step % self.val_interval == 0 and self.valid_dataloader is not None:
@@ -281,7 +355,7 @@ class SlicerTrainer(Trainer):
                                 loss = self.model.forward(audios, labels)
                             loss = loss.detach().item()
 
-                            self.writer.add_scalars("ddpm/loss", {"valid": loss}, step)
+                            self.writer.add_scalars("loss", {"valid": loss}, step)
 
                         print(f"step: {step}, valid loss: {loss}")
 
