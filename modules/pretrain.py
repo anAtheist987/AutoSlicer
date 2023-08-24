@@ -1,11 +1,204 @@
-from collections import OrderedDict
-
 import torch
 from torch import nn
 
 from typing import Sequence, Union, Optional
 
-from .model import Slicer, activation, normalization
+from .model import Slicer, activation, normalization, zero_module
+
+
+class GEGLU(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int):
+        super().__init__()
+        self.proj = nn.Linear(in_channels, out_channels * 2)
+
+    def forward(self, x):
+        x, gate = self.proj(x).chunk(2, dim=-1)
+        return x * nn.functional.gelu(gate)
+
+
+class FeedForward(nn.Module):
+    def __init__(self, in_channels: int, mult=4, dropout=0.):
+        super().__init__()
+        inner_channels = int(in_channels * mult)
+
+        self.net = nn.Sequential(
+            nn.LayerNorm(in_channels),
+            GEGLU(in_channels, inner_channels),
+            nn.Dropout(dropout),
+            zero_module(nn.Linear(inner_channels, in_channels)),
+        )
+
+    def forward(self, x):
+        return self.net(x) + x
+
+
+class CrossAttn(nn.Module):
+    """
+    Multi Head Cross Attention or Self Attention
+    """
+    def __init__(
+            self,
+            in_channels, context_channels=None,
+            head_num=8, head_channels=64,
+            dropout=0.,
+    ):
+        super().__init__()
+        if context_channels is None:
+            context_channels = in_channels
+
+        self.in_channels = in_channels
+        self.out_channels = in_channels
+        self.context_channels = context_channels
+
+        self.head_num = head_num
+        self.head_channels = head_channels
+        inner_channels = head_num * head_channels
+
+        self.norm0 = nn.LayerNorm(in_channels)
+        self.q = nn.Linear(in_channels, inner_channels)
+        self.k = nn.Linear(context_channels, inner_channels)
+        self.v = nn.Linear(context_channels, inner_channels)
+
+        self.proj_out = nn.Sequential(
+            nn.Dropout(p=dropout),
+            zero_module(nn.Linear(inner_channels, in_channels))
+            if inner_channels != in_channels else
+            nn.Identity(),
+        )
+
+    def forward(self, x, context=None):
+        """
+        cross attention with context
+        perform self attention if context is None
+        :param x: [N, L0, C] or [N*h*w, W*W, C]
+        :param context: Optional([N, L1, context_channels] or [N*h*w, W*W, C])
+        :return: [N, L0, C]
+        """
+        if context is None:
+            context = x
+        assert context.shape[-1] == self.context_channels, "unexpected context channels."
+
+        shortcut = x
+
+        x = self.norm0(x)
+        q = self.q(x)  # n,l0,h*d
+        k = self.k(context)  # n,l1,h*d
+        v = self.v(context)  # n,l1,h*d
+
+        q = q.unflatten(-1, (self.head_num, self.head_channels)).transpose(1, 2)   # n,h,l0,d
+        v = v.unflatten(-1, (self.head_num, self.head_channels)).transpose(1, 2)   # n,h,l1,d
+        k = k.unflatten(-1, (self.head_num, self.head_channels)).permute(0, 2, 3, 1)   # n,h,d,l1
+
+        attn = q @ k  # n,h,l0,l1
+        attn = attn * (self.head_channels ** (-0.5))
+
+        attn = torch.nn.functional.softmax(attn, dim=-1)
+        # attend to values
+        x = attn @ v  # n,h,l0,c1
+
+        x = (
+            x.transpose(1, 2)  # n,l0,h,d
+            .flatten(-2, -1)  # n,l0,h*d
+        )
+
+        x = self.proj_out(x)  # n,l0,c
+        return x + shortcut
+
+
+class SelfAttn(nn.Module):
+    def __init__(
+            self,
+            in_channels,
+            head_num=8, head_channels=64,
+            dropout=0.,
+    ):
+        super().__init__()
+        self.attn = CrossAttn(
+            in_channels=in_channels, context_channels=in_channels,
+            head_num=head_num, head_channels=head_channels,
+            dropout=dropout,
+        )
+
+    def forward(self, x):
+        """
+        perform self attention
+        :param x: [N, L0, C] or [N*h*w, W*W, C]
+        :return: [N, L0, C]
+        """
+        return self.attn(x, x)
+
+
+class TransformerBlock(nn.Module):
+    def __init__(
+            self,
+            in_channels: int,
+            context_channels: Optional[int] = None,
+            head_num=8, head_channels=64,
+            dropout=0.,
+    ):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = in_channels
+        self.context_channels = context_channels
+
+        inner_channels = head_num * head_channels
+
+        self.cross_attn = None
+        if context_channels is not None:
+            self.cross_attn = CrossAttn(
+                    in_channels=inner_channels, context_channels=context_channels,
+                    head_num=head_num, head_channels=head_channels,
+                    dropout=dropout,
+                )
+
+        self.proj_in = nn.Identity()
+        self.proj_out = nn.Identity()
+        if in_channels != inner_channels:
+            self.proj_in = nn.Linear(in_channels, inner_channels)
+            self.proj_out = nn.Linear(inner_channels, in_channels)
+
+        self.self_attn = SelfAttn(
+                in_channels=inner_channels,
+                head_num=head_num, head_channels=head_channels,
+                dropout=dropout,
+            )
+        self.ff = FeedForward(
+                in_channels=inner_channels, dropout=dropout
+            )
+
+    def forward(self, x, context=None):
+        """
+        :param x: [N, L0, C]
+        :param context: [N, L1, context_channels]
+        :return: [N, L0, C]
+        """
+        x = self.proj_in(x)
+        x = self.self_attn(x)
+        if self.cross_attn is not None:
+            x = self.self_attn(x, context)
+        x = self.ff(x)
+        x = self.proj_out(x)
+        return x
+
+
+def make_mask(batch: int, length: int, p=0.2, l=2) -> torch.BoolTensor:
+    """
+
+    Parameters
+    ----------
+    batch
+    length: length of mask
+    p: chance of being masked
+    l: length of a mask point if it is being chosen
+
+    Returns
+    -------
+    mask: torch.BoolTensor [N, L]
+    """
+    mask = (torch.rand(batch, length) < p).to(dtype=torch.float32)
+    mask = torch.constant_pad_nd(mask, (0, l - 1), value=0)
+    mask = torch.conv1d(mask, torch.ones(1, 1, l)) > 0
+    return mask
 
 
 class ContextPredictor(Slicer):
@@ -23,22 +216,43 @@ class ContextPredictor(Slicer):
             context_channel=context_channel, context_num_layers=0, out_ch=out_ch,
         )
 
-        self.context_model = nn.Sequential(OrderedDict([
-            ("proj_in", nn.Linear(channels[-1], context_channel)),
-            ("norm", nn.LayerNorm(context_channel)),
-            ("act", activation()),
-        ]))
+        self.pre_extract = nn.Linear(channels[-1], context_channel)
+        self.masked_code = nn.Parameter(torch.randn(context_channel))
+        self.pos_emb = nn.Conv1d(context_channel, context_channel, kernel_size=65, padding="same")
+
+        self.context_model = nn.Sequential()
+        self.context_model.add_module("act0", nn.Linear(context_channel, out_ch))
+        for i in range(context_num_layers):
+            self.context_model.add_module(f"tranformer{i}", TransformerBlock(
+                context_channel, head_num=context_num_heads, head_channels=context_channel // context_num_heads,
+                dropout=0.2,
+            ))
+        self.context_model.add_module("final_norm", nn.LayerNorm(context_channel))
+        self.context_model.add_module("final_proj", nn.Linear(context_channel, out_ch))
+
+        self.head = None
 
     def forward(self, x, target):
 
-        x = self.encoder(x)  # [N, L] -> [N, C, Lout]
+        z = self.encoder(x)  # [N, L] -> [N, C, Lout]
 
-        x = x.permute(0, 2, 1)  # [N, C, Lout] -> [N, Lout, C]
-        x = self.context_model(x)
+        # TODO: quantize
 
-        x = self.head(x)
+        z = z.permute(0, 2, 1)  # [N, C, Lout] -> [N, Lout, C]
 
-        return torch.nn.functional.binary_cross_entropy(x, target)
+        z = self.pre_extract(z)
+        mask = make_mask(*z.shape[0:2], p=0.2, l=0.2)
+        z = z * ~mask[..., None] + self.masked_code * mask[..., None]
+
+        z = z.permute(0, 2, 1)  # [N, Lout, C] -> [N, C, Lout]
+        z = self.pos_emb(z)
+        z = z.permute(0, 2, 1)  # [N, C, Lout] -> [N, Lout, C]
+
+        z = self.context_model(z)
+
+        z = self.head(z)
+
+        return z  # TODO: loss
 
 
 def predictor_small():

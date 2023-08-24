@@ -5,7 +5,8 @@ from modules.model import slicer_small
 from modules.dataloader import AudioDataset
 
 
-    os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+def pretrain():
+    pass  # TODO: pretrain script
 
 
 def train():
