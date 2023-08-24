@@ -4,11 +4,11 @@ from modules.trainer import SlicerTrainer
 from modules.model import slicer_small
 from modules.dataloader import AudioDataset
 
-if __name__ == '__main__':
-    import os
 
     os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
+
+def train():
     device = torch.device("cuda")
     load_model = False
     log_dir = r'.\logs'
@@ -27,13 +27,13 @@ if __name__ == '__main__':
         (
             (
                 torch.randn((batch_size, duration * sample_rate)),
-                torch.randint(0, 2, (batch_size, 1, duration * sample_rate // 3 ** 6), dtype=torch.float32)
+                torch.randint(0, 2, (batch_size, duration * sample_rate // 3 ** 6, 1), dtype=torch.float32)
             ) for _ in range(1000)
         ),
         (
             (
                 torch.randn((batch_size, duration * sample_rate)),
-                torch.randint(0, 2, (batch_size, 1, duration * sample_rate // 3 ** 6), dtype=torch.float32)
+                torch.randint(0, 2, (batch_size, duration * sample_rate // 3 ** 6, 1), dtype=torch.float32)
             ) for _ in range(1000)
         ),
         load_models=load_model,
@@ -47,3 +47,9 @@ if __name__ == '__main__':
         trainer.train()
 
     print("end")
+
+
+if __name__ == '__main__':
+    pass
+    train()
+    # pretrain()
