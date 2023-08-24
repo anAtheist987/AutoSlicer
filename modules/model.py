@@ -1,7 +1,9 @@
-import torch
-from torch import nn
+from collections import OrderedDict
 
-from typing import Sequence, Union
+import torch
+from torch import nn, Tensor
+
+from typing import Sequence, Union, Optional
 
 
 def normalization(channel):
@@ -21,6 +23,11 @@ def zero_module(module: torch.nn.Module):
     return module
 
 
+class Shortcut(nn.Sequential):
+    def forward(self, x):
+        return x + super(Shortcut, self).forward(x)
+
+
 class ResNeXtBlk(nn.Module):
     def __init__(self, in_ch, out_ch=None, kernel_size=3, padding: Union[str, int] = 'same', groups=4):
         super(ResNeXtBlk, self).__init__()
@@ -28,20 +35,21 @@ class ResNeXtBlk(nn.Module):
         if out_ch is None:
             out_ch = in_ch
 
-        self.layers = nn.Sequential(
+        self.layers = Shortcut(
             normalization(in_ch),
             activation(),
             nn.Conv1d(in_ch, out_ch // 2, kernel_size=1, padding=0),
+
             normalization(out_ch // 2),
             activation(),
             nn.Conv1d(out_ch // 2, out_ch // 2, kernel_size=kernel_size, padding=padding, groups=groups),
+
             normalization(out_ch // 2),
             activation(),
-            nn.Conv1d(out_ch // 2, out_ch, kernel_size=1, padding=0),
+            zero_module(nn.Conv1d(out_ch // 2, out_ch, kernel_size=1, padding=0)),
 
+            nn.Dropout(0.2)
         )
-
-        self.dropout = nn.Dropout(0.2)
 
     def forward(self, x):
         """
@@ -49,21 +57,32 @@ class ResNeXtBlk(nn.Module):
         :param x: [N, Cin, L]
         :return: [N, Cout, L]
         """
-        shortcut = x
-        x = self.layers(x)
-        x = self.dropout(x)
-
-        return x + shortcut
+        return self.layers(x)
 
 
-class BiGRU(nn.Module):
-    def __init__(self, n_in, n_hidden, dropout=0., num_layers=1):
-        super(BiGRU, self).__init__()
-        self.rnn = nn.GRU(n_in, n_hidden, bidirectional=True, dropout=dropout, batch_first=True, num_layers=num_layers)
+class UnaryGRU(nn.GRU):
+    def forward(self, x, hx=None):
+        x, h_n = super().forward(x, hx)
+        return x
+
+
+class BiGRUs(nn.Module):
+    def __init__(self, n_in, n_hidden, dropout=0., num_layers=1, shortcut=True):
+        super(BiGRUs, self).__init__()
+        if shortcut:
+            self.grus = nn.Sequential()
+            for i in range(num_layers):
+                self.grus.add_module(f"gru{i}", Shortcut(
+                    UnaryGRU(n_in, n_hidden // 2, bidirectional=True, batch_first=True, num_layers=1),
+                    nn.Dropout(dropout),
+                ))
+        else:
+            self.grus = UnaryGRU(n_in, n_hidden // 2, bidirectional=True, dropout=dropout, batch_first=True,
+                                 num_layers=num_layers)
+        self.shortcut = shortcut
 
     def forward(self, x):
-        x, _ = self.rnn(x)
-        return x
+        return self.grus(x)
 
 
 class SincConvFast(nn.Module):
@@ -287,7 +306,7 @@ class Encoder(nn.Module):
     def __init__(
             self,
             channels: Sequence[int] = (32, 48, 72, 96, 128, 160, 192),
-            group: Union[int, Sequence[int]] = 8,
+            group: Union[int, Sequence[int]] = 4,
             res_num=(1,) * 7, down_sample_scale=3,
     ):
         super(Encoder, self).__init__()
@@ -296,17 +315,18 @@ class Encoder(nn.Module):
 
         if isinstance(group, int):
             group = (group,) * len(channels)
-        self.down_samples = nn.ModuleList()
-        for i in range(len(channels)):
-            layer = nn.Sequential(
-                *([ResNeXtBlk(channels[i], kernel_size=5, groups=group[i])] * res_num[i])
-            )
-            if i < len(channels) - 1:
-                layer.append(nn.Conv1d(
-                    channels[i], channels[i + 1],
+        self.down_samples = nn.Sequential()
+        for level in range(len(channels)):
+            layer = nn.Sequential(OrderedDict([
+                (f"res{i}", ResNeXtBlk(channels[level], kernel_size=5, groups=group[level]))
+                for i in range(res_num[level])
+            ]))
+            if level < len(channels) - 1:
+                layer.add_module("downsample", nn.Conv1d(
+                    channels[level], channels[level + 1],
                     kernel_size=down_sample_scale, stride=down_sample_scale,
                 ))
-            self.down_samples.append(layer)
+            self.down_samples.add_module(f"layer{level}", layer)
 
     def forward(self, x):
         """
@@ -315,12 +335,8 @@ class Encoder(nn.Module):
         """
 
         x = x[:, None, :]  # [N, 1, L]
-
         x = self.stem(x)
-
-        for down in self.down_samples:
-            x = down(x)
-
+        x = self.down_samples(x)
         return x
 
 
@@ -333,35 +349,39 @@ class Slicer(nn.Module):
 
     def __init__(
             self,
-            channels: Sequence[int] = (32, 48, 72, 96, 128, 160, 192),  # down sample 6 times (256ms in 16k SR)
-            group: Union[int, Sequence[int]] = 8,
+            channels: Sequence[int] = (32, 48, 72, 96, 128, 160, 192),
+            group: Union[int, Sequence[int]] = 4,
             res_num=(1,) * 7, down_sample_scale=3,
+            context_channel=192, context_num_layer=4,
             out_ch=1,
-            rnn_channel=192,
     ):
         super(Slicer, self).__init__()
 
         self.encoder = Encoder(channels=channels, res_num=res_num, group=group, down_sample_scale=down_sample_scale)
 
-        self.gru = BiGRU(channels[-1], rnn_channel // 2, dropout=0.2, num_layers=4)
+        self.context_model = nn.Sequential(OrderedDict([
+            ("norm", nn.LayerNorm(channels[-1])),
+            ("act", activation()),
+            ("BiGRUs", BiGRUs(channels[-1], context_channel, dropout=0.2, num_layers=context_num_layer)),
+        ]))
 
         self.head = nn.Sequential(
-            normalization(rnn_channel),
+            normalization(context_channel),
             activation(),
-            nn.Conv1d(rnn_channel, out_ch, kernel_size=1),
+            nn.Conv1d(context_channel, out_ch, kernel_size=1),
         )
 
     def forward(self, x, label):
         """
         :param x: [N, L]
-        :param label: [N, L // scale ** (layer_num - 1)]
+        :param label: [N, 1, L // scale ** (layer_num - 1)]
         :return: [N, Cout, L // scale ** (layer_num - 1)]
         """
 
         x = self.encoder(x)  # [N, L] -> [N, C, Lout]
 
         x = x.permute(0, 2, 1)  # [N, C, Lout] -> [N, Lout, C]
-        x = self.gru(x)
+        x = self.context_model(x)
 
         x = x.permute(0, 2, 1)  # [N, Lout, C] -> [N, C, Lout]
         x = self.head(x)
@@ -369,7 +389,7 @@ class Slicer(nn.Module):
         return torch.nn.functional.binary_cross_entropy_with_logits(x, label)
 
 
-class Pretrain(nn.Module):
+class Pretrain(Slicer):
 
     def __init__(
             self,
@@ -388,9 +408,9 @@ class Pretrain(nn.Module):
 
 def slicer_small():
     return Slicer(
-        channels=(32, 48, 72, 108, 160, 224, 320),  # down sample 6 times (128ms in 16k SR)
-        res_num=(1,) * 7,
-        group=(4, 4, 6, 9, 10, 14, 16),
+        channels=(32, 48, 72, 108, 160, 224, 320),
+        res_num=(1,) * 7, down_sample_scale=3,
+        group=(4, 4, 6, 6, 8, 8, 8),
+        context_channel=320, context_num_layer=4,
         out_ch=1,
-        rnn_channel=320,
     )
