@@ -115,34 +115,51 @@ class Trainer:
     def lr_scheduler_path(self):
         return self.model_dir / f"{self.model.__class__.__name__}_lr_scheduler.pkl"
 
+    def save_model(self, model_path: Optional[PathLike] = None):
+        if model_path is None:
+            model_path = str(self.model_path)
+        if not (parent := Path(model_path).parent).exists():
+            parent.mkdir(parents=True)
+        torch.save(self.model.state_dict(), model_path)
+        print(f"model saved at {model_path}!")
+
     def save(
             self,
-            model_path: Union[bool, PathLike] = True,
-            optimizer_path: Union[bool, PathLike] = True,
-            lr_scheduler_path: Union[bool, PathLike] = True,
+            model_path: Optional[PathLike] = None,
+            optimizer_path: Optional[PathLike] = None,
+            lr_scheduler_path: Optional[PathLike] = None,
     ):
         """
         save model and other training parameters
         """
-        if model_path is True:
+        if model_path is None:
             model_path = str(self.model_path)
-        if optimizer_path is True:
+        if optimizer_path is None:
             optimizer_path = str(self.optimizer_path)
-        if lr_scheduler_path is True:
+        if lr_scheduler_path is None:
             lr_scheduler_path = str(self.lr_scheduler_path)
 
+        if not (parent := Path(model_path).parent).exists():
+            parent.mkdir(parents=True)
+        if not (parent := Path(optimizer_path).parent).exists():
+            parent.mkdir(parents=True)
+        if not (parent := Path(lr_scheduler_path).parent).exists():
+            parent.mkdir(parents=True)
+
         # save model
-        for param in self.model.parameters():
-            if param.isnan().any().item():
-                print("nan parameter, model unsaved!")
-                break
-        else:
-            torch.save(self.model.state_dict(), model_path)
-            print(f"model saved at {model_path}!")
+        if self.model is not None:
+            for param in self.model.parameters():
+                if param.isnan().any().item():
+                    print("nan parameter, model unsaved!")
+                    break
+            else:
+                torch.save(self.model.state_dict(), model_path)
+                print(f"model saved at {model_path}!")
 
         # save optimizer
-        torch.save(self.optimizer.state_dict(), optimizer_path)
-        print(f"optimizer saved at {optimizer_path}!")
+        if self.optimizer is not None:
+            torch.save(self.optimizer.state_dict(), optimizer_path)
+            print(f"optimizer saved at {optimizer_path}!")
 
         # save lr_scheduler
         if self.lr_scheduler is not None:
@@ -160,10 +177,11 @@ class Trainer:
         if lr_scheduler_path is None:
             lr_scheduler_path = self.lr_scheduler_path
 
-        if model_path.is_file():
+        if model_path.is_file() and self.model is not None:
             self.model.load_state_dict(torch.load(model_path), strict=False)
             print("model loaded!")
-        if optimizer_path.is_file():
+
+        if optimizer_path.is_file() and self.optimizer is not None:
             self.optimizer.load_state_dict(torch.load(optimizer_path))
             if self.start_step is None:
                 try:
@@ -173,8 +191,8 @@ class Trainer:
                     print("training step loaded!")
                 except StopIteration:
                     pass
-
             print("optimizer loaded!")
+
         if lr_scheduler_path.is_file() and self.lr_scheduler is not None:
             self.lr_scheduler.load_state_dict(torch.load(lr_scheduler_path))
             print("lr_scheduler loaded!")
