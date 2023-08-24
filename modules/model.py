@@ -387,7 +387,7 @@ class Slicer(nn.Module):
 
         x = self.encoder(x)  # [N, L] -> [N, C, Lout]
 
-        x = x.permute(0, 2, 1)  # [N, C, Lout] -> [N, Lout, C]
+        x = x.transpose(1, 2)  # [N, C, Lout] -> [N, Lout, C]
         x = self.context_model(x)
 
         x = self.head(x)

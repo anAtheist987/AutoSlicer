@@ -238,15 +238,15 @@ class ContextPredictor(Slicer):
 
         # TODO: quantize
 
-        z = z.permute(0, 2, 1)  # [N, C, Lout] -> [N, Lout, C]
+        z = z.transpose(1, 2)  # [N, C, Lout] -> [N, Lout, C]
 
         z = self.pre_extract(z)
         mask = make_mask(*z.shape[0:2], p=0.2, l=0.2)
         z = z * ~mask[..., None] + self.masked_code * mask[..., None]
 
-        z = z.permute(0, 2, 1)  # [N, Lout, C] -> [N, C, Lout]
+        z = z.transpose(1, 2)  # [N, Lout, C] -> [N, C, Lout]
         z = self.pos_emb(z)
-        z = z.permute(0, 2, 1)  # [N, C, Lout] -> [N, Lout, C]
+        z = z.transpose(1, 2)  # [N, C, Lout] -> [N, Lout, C]
 
         z = self.context_model(z)
 
