@@ -1,14 +1,13 @@
 from collections import OrderedDict
 
 import torch
-from torch import nn, Tensor
+from torch import nn
 
 from typing import Sequence, Union, Optional
 
 
 def normalization(channel):
-    # Put all channels into a single group (equivalent with LayerNorm)
-    return nn.GroupNorm(num_groups=1, num_channels=channel)
+    return nn.BatchNorm1d(channel)
 
 
 def activation():
@@ -29,25 +28,22 @@ class Shortcut(nn.Sequential):
         return x + super(Shortcut, self).forward(x)
 
 
-class ResNeXtBlk(nn.Module):
-    def __init__(self, in_ch, out_ch=None, kernel_size=3, padding: Union[str, int] = 'same', groups=4):
-        super(ResNeXtBlk, self).__init__()
-
-        if out_ch is None:
-            out_ch = in_ch
+class ResNeXt1d(nn.Module):
+    def __init__(self, in_ch, kernel_size=3, padding: Union[str, int] = 'same', groups=4):
+        super(ResNeXt1d, self).__init__()
 
         self.layers = Shortcut(
             normalization(in_ch),
             activation(),
-            nn.Conv1d(in_ch, out_ch // 2, kernel_size=1, padding=0),
+            nn.Conv1d(in_ch, in_ch // 2, kernel_size=1, padding=0),
 
-            normalization(out_ch // 2),
+            normalization(in_ch // 2),
             activation(),
-            nn.Conv1d(out_ch // 2, out_ch // 2, kernel_size=kernel_size, padding=padding, groups=groups),
+            nn.Conv1d(in_ch // 2, in_ch // 2, kernel_size=kernel_size, padding=padding, groups=groups),
 
-            normalization(out_ch // 2),
+            normalization(in_ch // 2),
             activation(),
-            zero_module(nn.Conv1d(out_ch // 2, out_ch, kernel_size=1, padding=0)),
+            zero_module(nn.Conv1d(in_ch // 2, in_ch, kernel_size=1, padding=0)),
 
             nn.Dropout(0.2)
         )
@@ -55,8 +51,8 @@ class ResNeXtBlk(nn.Module):
     def forward(self, x):
         """
 
-        :param x: [N, Cin, L]
-        :return: [N, Cout, L]
+        :param x: [N, C, L]
+        :return: [N, C, L]
         """
         return self.layers(x)
 
@@ -68,17 +64,17 @@ class UnaryGRU(nn.GRU):
 
 
 class BiGRUs(nn.Module):
-    def __init__(self, n_in, n_hidden, dropout=0., num_layers=1, shortcut=True):
+    def __init__(self, channels, dropout=0., num_layers=1, shortcut=True):
         super(BiGRUs, self).__init__()
         if shortcut:
             self.grus = nn.Sequential()
             for i in range(num_layers):
                 self.grus.add_module(f"gru{i}", Shortcut(
-                    UnaryGRU(n_in, n_hidden // 2, bidirectional=True, batch_first=True, num_layers=1),
+                    UnaryGRU(channels, channels // 2, bidirectional=True, batch_first=True, num_layers=1),
                     nn.Dropout(dropout),
                 ))
         else:
-            self.grus = UnaryGRU(n_in, n_hidden // 2, bidirectional=True, dropout=dropout, batch_first=True,
+            self.grus = UnaryGRU(channels, channels // 2, bidirectional=True, dropout=dropout, batch_first=True,
                                  num_layers=num_layers)
         self.shortcut = shortcut
 
@@ -324,7 +320,7 @@ class Encoder(nn.Module):
         self.down_samples = nn.Sequential()
         for level in range(len(channels)):
             layer = nn.Sequential(OrderedDict([
-                (f"res{i}", ResNeXtBlk(channels[level], kernel_size=5, groups=groups[level]))
+                (f"res{i}", ResNeXt1d(channels[level], kernel_size=5, groups=groups[level]))
                 for i in range(res_num[level])
             ]))
             if level < len(channels) - 1:
@@ -372,19 +368,20 @@ class Slicer(nn.Module):
         self.encoder = Encoder(channels=channels, res_num=res_num, groups=groups, down_sample_scale=down_sample_scale)
 
         self.context_model = nn.Sequential(OrderedDict([
-            ("BiGRUs", BiGRUs(channels[-1], context_channel, dropout=0.2, num_layers=context_num_layers)),
+            ("proj_in", nn.Linear(channels[-1], context_channel)),
+            ("norm", nn.LayerNorm(context_channel)),
+            ("act", activation()),
+            ("BiGRUs", BiGRUs(context_channel, dropout=0.2, num_layers=context_num_layers)),
         ]))
 
         self.head = nn.Sequential(
-            normalization(context_channel),
-            activation(),
-            nn.Conv1d(context_channel, out_ch, kernel_size=1),
+            nn.Linear(context_channel, out_ch),
         )
 
-    def forward(self, x, label):
+    def forward(self, x, target):
         """
         :param x: [N, L]
-        :param label: [N, 1, L // scale ** (layer_num - 1)]
+        :param target: [N, L // scale ** (layer_num - 1), 1]
         :return: [N, Cout, L // scale ** (layer_num - 1)]
         """
 
@@ -393,28 +390,9 @@ class Slicer(nn.Module):
         x = x.permute(0, 2, 1)  # [N, C, Lout] -> [N, Lout, C]
         x = self.context_model(x)
 
-        x = x.permute(0, 2, 1)  # [N, Lout, C] -> [N, C, Lout]
         x = self.head(x)
 
-        return torch.nn.functional.binary_cross_entropy(x, label)
-
-
-class ContextPredictor(Slicer):
-    def __init__(
-            self,
-            channels: Sequence[int] = (32, 48, 72, 96, 128, 160, 192),
-            groups: Union[int, Sequence[int]] = 4,
-            res_num: Union[int, Sequence[int]] = 1,
-            down_sample_scale: Union[int, Sequence[int]] = 3,
-            context_channel=192, context_num_layers=4, context_num_heads=4,
-            out_ch=1,
-    ):
-        super(ContextPredictor, self).__init__(
-            channels=channels, groups=groups, res_num=res_num, down_sample_scale=down_sample_scale,
-            context_channel=context_channel, context_num_layers=0, out_ch=out_ch,
-        )
-
-        self.context_model = nn.Sequential()
+        return nn.functional.binary_cross_entropy_with_logits(x, target)
 
 
 def slicer_small():
@@ -422,16 +400,6 @@ def slicer_small():
         channels=(32, 48, 72, 108, 160, 224, 320),
         res_num=(1,) * 7, down_sample_scale=3,
         groups=(4, 4, 6, 6, 8, 8, 8),
-        context_channel=320, context_num_layers=4,
+        context_channel=512, context_num_layers=4,
         out_ch=1,
-    )
-
-
-def predictor_small():
-    return ContextPredictor(
-        channels=(32, 48, 72, 108, 160, 224, 320),
-        res_num=(1,) * 7, down_sample_scale=3,
-        groups=(4, 4, 6, 6, 8, 8, 8),
-        context_channel=320, context_num_layers=8, context_num_heads=8,
-        out_ch=320,
     )
