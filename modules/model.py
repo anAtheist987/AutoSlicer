@@ -7,7 +7,8 @@ from typing import Sequence, Union, Optional
 
 
 def normalization(channel):
-    return nn.BatchNorm1d(channel)
+    # Put all channels into a single group (equivalent with LayerNorm)
+    return nn.GroupNorm(num_groups=1, num_channels=channel)
 
 
 def activation():
@@ -306,27 +307,36 @@ class Encoder(nn.Module):
     def __init__(
             self,
             channels: Sequence[int] = (32, 48, 72, 96, 128, 160, 192),
-            group: Union[int, Sequence[int]] = 4,
-            res_num=(1,) * 7, down_sample_scale=3,
+            groups: Union[int, Sequence[int]] = 4,
+            res_num: Union[int, Sequence[int]] = 1,
+            down_sample_scale: Union[int, Sequence[int]] = 3,
     ):
         super(Encoder, self).__init__()
+        if isinstance(groups, int):
+            groups = (groups,) * len(channels)
+        if isinstance(res_num, int):
+            res_num = (res_num,) * len(channels)
+        if isinstance(down_sample_scale, int):
+            down_sample_scale = (down_sample_scale,) * (len(channels) - 1)
 
         self.stem = SincConvFast(out_channels=channels[0], kernel_size=65, padding='same', sample_rate=8000)
 
-        if isinstance(group, int):
-            group = (group,) * len(channels)
         self.down_samples = nn.Sequential()
         for level in range(len(channels)):
             layer = nn.Sequential(OrderedDict([
-                (f"res{i}", ResNeXtBlk(channels[level], kernel_size=5, groups=group[level]))
+                (f"res{i}", ResNeXtBlk(channels[level], kernel_size=5, groups=groups[level]))
                 for i in range(res_num[level])
             ]))
             if level < len(channels) - 1:
                 layer.add_module("downsample", nn.Conv1d(
                     channels[level], channels[level + 1],
-                    kernel_size=down_sample_scale, stride=down_sample_scale,
+                    kernel_size=down_sample_scale[level], stride=down_sample_scale[level],
                 ))
             self.down_samples.add_module(f"layer{level}", layer)
+
+        self.final = nn.Sequential(
+            normalization(channels[-1]),
+        )
 
     def forward(self, x):
         """
@@ -337,6 +347,7 @@ class Encoder(nn.Module):
         x = x[:, None, :]  # [N, 1, L]
         x = self.stem(x)
         x = self.down_samples(x)
+        x = self.final(x)
         return x
 
 
@@ -350,19 +361,18 @@ class Slicer(nn.Module):
     def __init__(
             self,
             channels: Sequence[int] = (32, 48, 72, 96, 128, 160, 192),
-            group: Union[int, Sequence[int]] = 4,
-            res_num=(1,) * 7, down_sample_scale=3,
-            context_channel=192, context_num_layer=4,
+            groups: Union[int, Sequence[int]] = 4,
+            res_num: Union[int, Sequence[int]] = 1,
+            down_sample_scale: Union[int, Sequence[int]] = 3,
+            context_channel=192, context_num_layers=4,
             out_ch=1,
     ):
         super(Slicer, self).__init__()
 
-        self.encoder = Encoder(channels=channels, res_num=res_num, group=group, down_sample_scale=down_sample_scale)
+        self.encoder = Encoder(channels=channels, res_num=res_num, groups=groups, down_sample_scale=down_sample_scale)
 
         self.context_model = nn.Sequential(OrderedDict([
-            ("norm", nn.LayerNorm(channels[-1])),
-            ("act", activation()),
-            ("BiGRUs", BiGRUs(channels[-1], context_channel, dropout=0.2, num_layers=context_num_layer)),
+            ("BiGRUs", BiGRUs(channels[-1], context_channel, dropout=0.2, num_layers=context_num_layers)),
         ]))
 
         self.head = nn.Sequential(
@@ -386,31 +396,42 @@ class Slicer(nn.Module):
         x = x.permute(0, 2, 1)  # [N, Lout, C] -> [N, C, Lout]
         x = self.head(x)
 
-        return torch.nn.functional.binary_cross_entropy_with_logits(x, label)
+        return torch.nn.functional.binary_cross_entropy(x, label)
 
 
-class Pretrain(Slicer):
-
+class ContextPredictor(Slicer):
     def __init__(
             self,
-            channels: Sequence[int] = (32, 48, 72, 96, 128, 160, 192),  # down sample 6 times (256ms in 16k SR)
-            res_num=(1,) * 7,
+            channels: Sequence[int] = (32, 48, 72, 96, 128, 160, 192),
+            groups: Union[int, Sequence[int]] = 4,
+            res_num: Union[int, Sequence[int]] = 1,
+            down_sample_scale: Union[int, Sequence[int]] = 3,
+            context_channel=192, context_num_layers=4, context_num_heads=4,
             out_ch=1,
     ):
-        super(Pretrain, self).__init__()
-
-        self.encoder = Encoder(channels=channels, res_num=res_num)
-
-        self.head = nn.Sequential(
-
+        super(ContextPredictor, self).__init__(
+            channels=channels, groups=groups, res_num=res_num, down_sample_scale=down_sample_scale,
+            context_channel=context_channel, context_num_layers=0, out_ch=out_ch,
         )
+
+        self.context_model = nn.Sequential()
 
 
 def slicer_small():
     return Slicer(
         channels=(32, 48, 72, 108, 160, 224, 320),
         res_num=(1,) * 7, down_sample_scale=3,
-        group=(4, 4, 6, 6, 8, 8, 8),
-        context_channel=320, context_num_layer=4,
+        groups=(4, 4, 6, 6, 8, 8, 8),
+        context_channel=320, context_num_layers=4,
         out_ch=1,
+    )
+
+
+def predictor_small():
+    return ContextPredictor(
+        channels=(32, 48, 72, 108, 160, 224, 320),
+        res_num=(1,) * 7, down_sample_scale=3,
+        groups=(4, 4, 6, 6, 8, 8, 8),
+        context_channel=320, context_num_layers=8, context_num_heads=8,
+        out_ch=320,
     )
