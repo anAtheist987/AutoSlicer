@@ -291,6 +291,8 @@ class PreTrainer(Trainer):
 
                         print(f"step: {step}, valid loss: {loss}")
 
+                        torch.cuda.empty_cache()
+
                     # save model
                     if step % self.save_interval == 0:
                         self.save()
