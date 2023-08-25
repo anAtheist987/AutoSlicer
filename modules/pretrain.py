@@ -308,9 +308,9 @@ class ContextPredictor(Slicer):
         loss = l_contrastive + 0.1 * l_diversity + 10 * l_penalty
 
         # for logging
-        self.l_contrastive = l_contrastive.detach()
-        self.l_diversity = l_diversity.detach()
-        self.l_penalty = l_penalty.detach()
+        self.l_contrastive = l_contrastive.detach().item()
+        self.l_diversity = l_diversity.detach().item()
+        self.l_penalty = l_penalty.detach().item()
 
         return loss
 

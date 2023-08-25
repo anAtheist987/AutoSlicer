@@ -15,7 +15,7 @@ def pretrain():
 
     train_data_path = r"E:\DataSet\audio\eureka\pv\cut\8k"
     valid_data_path = r"E:\DataSet\audio\eureka\pv\cut\8k"
-    batch_size = 32
+    batch_size = 16
     sample_rate = 8000
     duration = 100 * 3 ** 6  # in original frames
 
@@ -29,7 +29,7 @@ def pretrain():
     valid_dataloader = DataLoader(
         AudioDataset(sample_rate=sample_rate, split_size=duration, front_overlap=0, back_overlap=0,
                      data_path=valid_data_path),
-        batch_size=batch_size, shuffle=True, num_workers=0, drop_last=True,
+        batch_size=batch_size, shuffle=True, num_workers=0, drop_last=True, pin_memory=True,
     )
 
     trainer = PreTrainer(
