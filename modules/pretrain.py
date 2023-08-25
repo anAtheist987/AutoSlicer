@@ -212,7 +212,7 @@ class Quantizer(nn.Module):
         x = nn.functional.gumbel_softmax(x, 1., hard=False, dim=-1)
 
         # sigma(group, exp(-sigma(entry, p*log(g)))) and mean on batch
-        prob_perplexity = (-x * torch.log(x)).sum(-1).exp().sum(0).mean()
+        prob_perplexity = (-x * torch.log(x + 1e-8)).sum(-1).exp().sum(0).mean()
         loss = (1 - prob_perplexity / (self.group * self.entry))
 
         code_part = [
