@@ -1,7 +1,7 @@
 from typing import Optional
 
 import torch
-
+import pandas as pd
 import soundfile
 
 from torch.utils.data import Dataset
@@ -15,6 +15,21 @@ def scanner(path: Path):
             yield from scanner(i)
         elif i.is_file():
             yield i
+
+
+def read_time(time: str):
+    secs = 0
+    split_len = time.strip().split(':').__len__()
+    if split_len == 1:
+        secs = int(time)
+    elif split_len == 2:
+        m, s = time.strip().split(':')
+        secs = int(m) * 60 + int(s)
+    elif split_len == 3:
+        h, m, s = time.strip().split(':')
+        secs = int(h) * 3600 + int(m) * 60 + int(s)
+
+    return secs
 
 
 class AudioDataset(Dataset):
@@ -31,7 +46,7 @@ class AudioDataset(Dataset):
                 break
         else:
             raise IndexError("index out of dataset total slices")
-        chunk, sr = soundfile.read(path, frames=self.chunk_size, start=index * self.split_size, dtype="float32")  # TODO: 改成了soundfile，未验证
+        chunk, sr = soundfile.read(path, frames=self.chunk_size, start=index * self.split_size, dtype="float32")
         assert sr == self.sample_rate
         if len(chunk.shape) > 1:
             chunk = chunk.mean(-1)  # l,c -> l
@@ -69,3 +84,35 @@ class AudioDataset(Dataset):
 
 class PretrainAudio(AudioDataset):
     pass  # TODO: 实现随机取负样本
+
+
+class FineTuneAudio(AudioDataset):
+    def __getitem__(self, item):
+
+        return super().__getitem__(item), self.tags[item]
+
+    def __init__(self, audio_path=Path(r"D:\课程 2023暑假\数据集\歌回【阿梓从小就很可爱】"), mark_path=Path(r"D:\课程 2023暑假\数据集\阿梓 标注"),
+                 sep="\t"):
+        super().__init__()
+        self.tags = []
+        for path in scanner(mark_path):
+            if mark_path.suffix == ".csv":
+                mark_file = pd.read_csv(mark_path, sep=sep, )
+                start = list(map(read_time, mark_file.loc["Start"]))
+                duration = list(map(read_time, mark_file.loc["Duration"]))
+                full_duration = soundfile.info(str(audio_path) + mark_path.name[:-4]).duration
+                # 去掉文件后缀（假定为".wav"）
+
+                start = list(map(self.times_rate, start))
+                duration = list(map(self.times_rate, duration))
+                full_duration *= self.sample_rate
+                # 按照采样点生成标签
+
+                tag = torch.zeros([full_duration])
+                for start_pt, duration_len in start, duration:
+                    tag[start_pt: start_pt + duration_len] = 1
+                self.tags.append(tag)
+
+
+    def times_rate(self, x):
+        return x * self.sample_rate
