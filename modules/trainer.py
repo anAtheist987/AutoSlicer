@@ -309,7 +309,7 @@ class SlicerTrainer(Trainer):
             self, *args,
             print_interval=10,
             val_interval=100,
-            save_interval=200,
+            save_interval=1000,
             **kwargs,
     ):
         super().__init__(*args, **kwargs)
