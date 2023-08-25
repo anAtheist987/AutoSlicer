@@ -285,7 +285,7 @@ class ContextPredictor(Slicer):
         latent = latent.transpose(1, 2)  # [N, C, L] -> [N, L, C]
         mask = make_mask(*latent.shape[0:2], p=0.2, l=2).to(latent.device)  # [N, L]
 
-        l_penalty = latent.norm(dim=-1).mean()
+        l_penalty = (latent ** 2).mean()
 
         q = latent[mask]  # [Lmask, C]
         q, l_diversity = self.quantizer(q)  # [Lmask, Cout]
