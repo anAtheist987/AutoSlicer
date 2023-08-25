@@ -275,6 +275,11 @@ class ContextPredictor(Slicer):
         self.context_model.add_module("norm_fin", nn.LayerNorm(context_channel))
         self.context_model.add_module("proj_fin", nn.Linear(context_channel, out_ch))
 
+        # for logging
+        self.l_contrastive = None
+        self.l_diversity = None
+        self.l_penalty = None
+
     def forward(self, x, _=None):
         latent = self.encoder(x)  # [N, L] -> [N, C, Lout]
         latent = latent.transpose(1, 2)  # [N, C, L] -> [N, L, C]
@@ -301,6 +306,11 @@ class ContextPredictor(Slicer):
         l_contrastive = nn.functional.cross_entropy(sim, torch.arange(sim.shape[-1], device=sim.device))
 
         loss = l_contrastive + 0.1 * l_diversity + 10 * l_penalty
+
+        # for logging
+        self.l_contrastive = l_contrastive.detach()
+        self.l_diversity = l_diversity.detach()
+        self.l_penalty = l_penalty.detach()
 
         return loss
 

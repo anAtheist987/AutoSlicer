@@ -1,4 +1,5 @@
 from collections import OrderedDict
+from math import prod
 
 import torch
 from torch import nn
@@ -314,6 +315,7 @@ class Encoder(nn.Module):
             res_num = (res_num,) * len(channels)
         if isinstance(down_sample_scale, int):
             down_sample_scale = (down_sample_scale,) * (len(channels) - 1)
+        self.down_sample_scale = int(prod(down_sample_scale))
 
         self.stem = SincConvFast(out_channels=channels[0], kernel_size=65, padding='same', sample_rate=8000)
 

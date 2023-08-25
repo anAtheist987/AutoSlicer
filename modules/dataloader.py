@@ -46,6 +46,7 @@ class AudioDataset(Dataset):
             split_size=4 * 60 * 8000, front_overlap=2 * 60 * 8000, back_overlap=2 * 60 * 8000,
             data_path=Path("D:\\课程 2023暑假\\数据集\\"), data_suffix: Optional[str] = ".wav",
     ):
+        data_path = Path(data_path)
         self.split_size = split_size
         self.chunk_size = split_size + front_overlap + back_overlap
         self.data_path = data_path
@@ -54,7 +55,7 @@ class AudioDataset(Dataset):
         self.split_list = []
 
         for path in scanner(data_path):
-            if data_suffix is None or data_path.suffix == data_suffix:
+            if data_suffix is None or path.suffix == data_suffix:
                 info = soundfile.info(str(path))
                 if info.samplerate != self.sample_rate:
                     print(f"Skipped file not satisfying sample rate: {path}")
