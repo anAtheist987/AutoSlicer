@@ -372,11 +372,9 @@ class Slicer(nn.Module):
             ("norm", nn.LayerNorm(context_channel)),
             ("act", activation()),
             ("BiGRUs", BiGRUs(context_channel, dropout=0.2, num_layers=context_num_layers)),
+            ("norm_fin", nn.LayerNorm(context_channel)),
+            ("proj_fin", nn.Linear(context_channel, out_ch)),
         ]))
-
-        self.head = nn.Sequential(
-            nn.Linear(context_channel, out_ch),
-        )
 
     def forward(self, x, target):
         """
@@ -389,8 +387,6 @@ class Slicer(nn.Module):
 
         x = x.transpose(1, 2)  # [N, C, Lout] -> [N, Lout, C]
         x = self.context_model(x)
-
-        x = self.head(x)
 
         return nn.functional.binary_cross_entropy_with_logits(x, target)
 
