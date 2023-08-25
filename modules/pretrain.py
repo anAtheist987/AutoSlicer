@@ -223,24 +223,28 @@ class Quantizer(nn.Module):
         return x, loss
 
 
-def make_mask(batch: int, length: int, p=0.2, l=2) -> torch.BoolTensor:
+def make_mask(batch: int, length: int, p=0.2, l=2, device=torch.device("cpu")) -> torch.Tensor:
     """
 
     Parameters
     ----------
-    batch
-    length: length of mask
-    p: chance of being masked
+    batch: batch size
+    length: length of mask shape
+    p: chance of a point to be masked
     l: length of a mask point if it is being chosen
+    device
 
     Returns
     -------
     mask: torch.BoolTensor [N, L]
     """
-    mask = (torch.rand(batch, length) < p).to(dtype=torch.float32)
+    mask = torch.zeros((batch * length,), device=device, dtype=torch.float32)
+    mask[:round(batch * length * p)] = 1
+    mask: torch.Tensor = mask[torch.randperm(batch * length)]
+    mask = mask.view(batch, length)
     mask = torch.constant_pad_nd(mask, (0, l - 1), value=0)
-    mask = torch.conv1d(mask[:, None, :], torch.ones(1, 1, l)) > 0
-    return mask.squeeze(1)
+    mask = torch.conv1d(mask[:, None, :], torch.ones(1, 1, l)).squeeze(1) > 0
+    return mask
 
 
 class ContextPredictor(Slicer):
