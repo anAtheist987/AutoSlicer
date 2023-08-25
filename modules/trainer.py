@@ -246,8 +246,9 @@ class PreTrainer(Trainer):
                 self.optimizer.zero_grad()
                 self.model.train()
 
-                with get_autocast(self.device):
-                    loss = self.model.forward(audios)
+                # with get_autocast(self.device):
+                #     loss = self.model.forward(audios)
+                loss = self.model.forward(audios)
 
                 if self.scaler is None:
                     loss.backward()

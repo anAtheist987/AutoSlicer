@@ -317,7 +317,10 @@ class Encoder(nn.Module):
             down_sample_scale = (down_sample_scale,) * (len(channels) - 1)
         self.down_sample_scale = int(prod(down_sample_scale))
 
-        self.stem = SincConvFast(out_channels=channels[0], kernel_size=65, padding='same', sample_rate=8000)
+        self.stem = nn.Sequential(
+            normalization(1),
+            SincConvFast(out_channels=channels[0], kernel_size=65, padding='same', sample_rate=8000),
+        )
 
         self.down_samples = nn.Sequential()
         for level in range(len(channels)):
