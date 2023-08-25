@@ -209,16 +209,15 @@ class Quantizer(nn.Module):
         """
         x = self.weight_proj(x)  # [..., entry*group]
         x = torch.stack(x.chunk(self.group, -1), dim=0)  # [group, ..., entry]
-        x = nn.functional.gumbel_softmax(x, 1., hard=False, dim=0)
+        x = nn.functional.gumbel_softmax(x, 1., hard=False, dim=-1)
 
         # sigma(group, exp(-sigma(entry, p*log(g)))) and mean on batch
         prob_perplexity = (-x * torch.log(x)).sum(-1).exp().sum(0).mean()
         loss = (1 - prob_perplexity / (self.group * self.entry))
 
-        code_part = torch.chunk(x, len(self.codebooks), -1)
         code_part = [
             part @ codebook.weight
-            for part, codebook in zip(code_part, self.codebooks)
+            for part, codebook in zip(x, self.codebooks)
         ]  # list[..., Cout//group]
         x = torch.cat(code_part, -1)  # [..., Cout]
         return x, loss
@@ -240,8 +239,8 @@ def make_mask(batch: int, length: int, p=0.2, l=2) -> torch.BoolTensor:
     """
     mask = (torch.rand(batch, length) < p).to(dtype=torch.float32)
     mask = torch.constant_pad_nd(mask, (0, l - 1), value=0)
-    mask = torch.conv1d(mask, torch.ones(1, 1, l)) > 0
-    return mask
+    mask = torch.conv1d(mask[:, None, :], torch.ones(1, 1, l)) > 0
+    return mask.squeeze(1)
 
 
 class ContextPredictor(Slicer):
@@ -267,7 +266,7 @@ class ContextPredictor(Slicer):
         self.pos_emb = nn.Conv1d(context_channel, context_channel, kernel_size=65, padding="same", groups=8)
 
         self.context_model = nn.Sequential()
-        self.context_model.add_module("act0", nn.Linear(context_channel, out_ch))
+        self.context_model.add_module("act0", activation())
         for i in range(context_num_layers):
             self.context_model.add_module(f"tranformer{i}", TransformerBlock(
                 context_channel, head_num=context_num_heads, head_channels=context_channel // context_num_heads,
@@ -279,7 +278,7 @@ class ContextPredictor(Slicer):
     def forward(self, x, _=None):
         latent = self.encoder(x)  # [N, L] -> [N, C, Lout]
         latent = latent.transpose(1, 2)  # [N, C, L] -> [N, L, C]
-        mask = make_mask(*latent.shape[0:2], p=0.2, l=0.2)  # [N, L]
+        mask = make_mask(*latent.shape[0:2], p=0.2, l=2).to(latent.device)  # [N, L]
 
         l_penalty = latent.norm(dim=-1).mean()
 
@@ -296,7 +295,7 @@ class ContextPredictor(Slicer):
         c = self.context_model(c)  # [N, L, Cout]
         c = c[mask]  # [Lmask, Cout]
 
-        sim = nn.functional.cosine_similarity(c[:, None], q)  # [Lmask(c), Lmask(q)]
+        sim = nn.functional.cosine_similarity(c[:, None], q[None, :], dim=-1)  # [Lmask(c), Lmask(q)]
         temperature = 0.1
         sim = sim / temperature
         l_contrastive = nn.functional.cross_entropy(sim, torch.arange(sim.shape[-1], device=sim.device))
