@@ -193,6 +193,9 @@ class Quantizer(nn.Module):
         self.weight_proj = nn.Linear(in_channel, group * entry)
         self.proj_q = nn.Linear(out_channel, out_channel)
 
+        self.group = group
+        self.entry = entry
+
     def forward(self, x: torch.Tensor):
         """
 
@@ -205,15 +208,20 @@ class Quantizer(nn.Module):
 
         """
         x = self.weight_proj(x)  # [..., entry*group]
-        x = nn.functional.gumbel_softmax(x, 1., hard=False, dim=-1)
+        x = torch.stack(x.chunk(self.group, -1), dim=0)  # [group, ..., entry]
+        x = nn.functional.gumbel_softmax(x, 1., hard=False, dim=0)
 
-        code_part = torch.chunk(x, len(self.codebooks), -1)  # list[..., entry]
+        # sigma(group, exp(-sigma(entry, p*log(g)))) and mean on batch
+        prob_perplexity = (-x * torch.log(x)).sum(-1).exp().sum(0).mean()
+        loss = (1 - prob_perplexity / (self.group * self.entry))
+
+        code_part = torch.chunk(x, len(self.codebooks), -1)
         code_part = [
             part @ codebook.weight
             for part, codebook in zip(code_part, self.codebooks)
         ]  # list[..., Cout//group]
         x = torch.cat(code_part, -1)  # [..., Cout]
-        return x
+        return x, loss
 
 
 def make_mask(batch: int, length: int, p=0.2, l=2) -> torch.BoolTensor:
@@ -252,11 +260,11 @@ class ContextPredictor(Slicer):
             context_channel=context_channel, context_num_layers=0, out_ch=out_ch,
         )
 
+        self.masked_code = nn.Parameter(torch.randn(context_channel))
         self.quantizer = Quantizer(channels[-1], out_channel=out_ch, group=codebook_group, entry=codebook_entry)
 
         self.pre_extract = nn.Linear(channels[-1], context_channel)
-        self.masked_code = nn.Parameter(torch.randn(context_channel))
-        self.pos_emb = nn.Conv1d(context_channel, context_channel, kernel_size=65, padding="same")
+        self.pos_emb = nn.Conv1d(context_channel, context_channel, kernel_size=65, padding="same", groups=8)
 
         self.context_model = nn.Sequential()
         self.context_model.add_module("act0", nn.Linear(context_channel, out_ch))
@@ -265,20 +273,18 @@ class ContextPredictor(Slicer):
                 context_channel, head_num=context_num_heads, head_channels=context_channel // context_num_heads,
                 dropout=0.2,
             ))
-        self.context_model.add_module("final_norm", nn.LayerNorm(context_channel))
-        self.context_model.add_module("final_proj", nn.Linear(context_channel, out_ch))
+        self.context_model.add_module("norm_fin", nn.LayerNorm(context_channel))
+        self.context_model.add_module("proj_fin", nn.Linear(context_channel, out_ch))
 
-        self.head = None
-
-    def forward(self, x, target):
-
+    def forward(self, x, _=None):
         latent = self.encoder(x)  # [N, L] -> [N, C, Lout]
         latent = latent.transpose(1, 2)  # [N, C, L] -> [N, L, C]
         mask = make_mask(*latent.shape[0:2], p=0.2, l=0.2)  # [N, L]
 
+        l_penalty = latent.norm(dim=-1).mean()
+
         q = latent[mask]  # [Lmask, C]
-        q = self.quantizer(q)
-        # TODO: quantize loss
+        q, l_diversity = self.quantizer(q)  # [Lmask, Cout]
 
         c = self.pre_extract(latent)
         c = c * ~mask[..., None] + self.masked_code * mask[..., None]
@@ -287,11 +293,17 @@ class ContextPredictor(Slicer):
         c = self.pos_emb(c)
         c = c.transpose(1, 2)  # [N, C, L] -> [N, L, C]
 
-        c = self.context_model(c)
+        c = self.context_model(c)  # [N, L, Cout]
+        c = c[mask]  # [Lmask, Cout]
 
-        c = self.head(c)
+        sim = nn.functional.cosine_similarity(c[:, None], q)  # [Lmask(c), Lmask(q)]
+        temperature = 0.1
+        sim = sim / temperature
+        l_contrastive = nn.functional.cross_entropy(sim, torch.arange(sim.shape[-1], device=sim.device))
 
-        return c  # TODO: loss
+        loss = l_contrastive + 0.1 * l_diversity + 10 * l_penalty
+
+        return loss
 
 
 def predictor_small():
