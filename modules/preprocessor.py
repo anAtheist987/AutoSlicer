@@ -1,28 +1,31 @@
 import ffmpeg
 from pathlib import Path
 
-data_path = Path(r"D:\课程 2023暑假\数据集")
-
 
 def scanner(path: Path):
     for i in path.iterdir():
         if i.is_dir():
             yield from scanner(i)
-        elif i.is_file() and i.suffix == ".m4s":
+        elif i.is_file():
             yield i
 
 
-def switch(src: Path):
+def switch(src: Path, dst: Path = None, sample_rate=8000):
+    if dst is None:
+        dst = str(src.parent / (src.stem + "_new" + src.suffix))
+    if not dst.parent.exists():
+        dst.parent.mkdir(parents=True)
     stream = (
         ffmpeg
         .input(src.__str__())
-        .output(str(src.parent / src.stem) + ".wav", **{'ac': 1, 'ar': 8000, })
+        .output(str(dst), **{'ac': 1, 'ar': sample_rate, })
     )
     stream.run()
 
 
 if __name__ == '__main__':
-    for path in scanner(data_path):
-        switch(path)
-
-
+    data_path = Path(r"E:\DataSet\audio\eureka\pv\cut")
+    dst_dir = Path(r"E:\DataSet\audio\eureka\pv\cut\8k")
+    for audio_file in scanner(data_path):
+        relative = audio_file.relative_to(data_path)
+        switch(audio_file, dst=dst_dir / relative.parent / (relative.stem + ".wav"))
