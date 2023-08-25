@@ -246,8 +246,11 @@ class PreTrainer(Trainer):
                 self.optimizer.zero_grad()
                 self.model.train()
 
-                with get_autocast(self.device):
-                    loss = self.model.forward(audios)
+                # with get_autocast(self.device):
+                #     loss = self.model.forward(audios)
+                loss = self.model.forward(audios)
+                if loss.isnan():
+                    print("warning: nan")
 
                 if self.scaler is None:
                     loss.backward()
@@ -280,8 +283,9 @@ class PreTrainer(Trainer):
                         with torch.no_grad():
                             audios = self.valid_dataloader.__next__()
                             audios = audios.to(self.device)
-                            with get_autocast(self.device):
-                                loss = self.model.forward(audios)
+                            # with get_autocast(self.device):
+                            #     loss = self.model.forward(audios)
+                            loss = self.model.forward(audios)
                             loss = loss.detach().item()
 
                             self.writer.add_scalars("loss/g", {"valid": loss}, step)
