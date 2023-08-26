@@ -384,7 +384,7 @@ class Slicer(nn.Module):
     def forward(self, x, target):
         """
         :param x: [N, L]
-        :param target: [N, L // scale ** (layer_num - 1), 1]
+        :param target: [N, 1, L // scale ** (layer_num - 1)]
         :return: [N, Cout, L // scale ** (layer_num - 1)]
         """
 
@@ -392,6 +392,7 @@ class Slicer(nn.Module):
 
         x = x.transpose(1, 2)  # [N, C, Lout] -> [N, Lout, C]
         x = self.context_model(x)
+        x = x.transpose(1, 2)  # [N, Lout, C] -> [N, C, Lout]
 
         return nn.functional.binary_cross_entropy_with_logits(x, target)
 

@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import pandas as pd
@@ -47,6 +47,7 @@ class AudioDataset(Dataset):
         else:
             raise IndexError("index out of dataset total slices")
         chunk, sr = soundfile.read(path, frames=self.chunk_size, start=index * self.split_size, dtype="float32")
+        soundfile.write(r"D:\课程 2023暑假\new.wav", chunk, sr)
         assert sr == self.sample_rate
         if len(chunk.shape) > 1:
             chunk = chunk.mean(-1)  # l,c -> l
@@ -57,9 +58,9 @@ class AudioDataset(Dataset):
         return self.index_num
 
     def __init__(
-            self, sample_rate=8000,
+            self, data_path: Union[Path, str], sample_rate=8000,
             split_size=4 * 60 * 8000, front_overlap=2 * 60 * 8000, back_overlap=2 * 60 * 8000,
-            data_path=Path("D:\\课程 2023暑假\\数据集\\"), data_suffix: Optional[str] = ".wav",
+            data_suffix: Optional[str] = ".wav",
     ):
         data_path = Path(data_path)
         self.split_size = split_size
@@ -105,11 +106,11 @@ class FineTuneAudio(AudioDataset):
 
         start = (list(map(self.times_rate, start)))
         duration = (list(map(self.times_rate, duration)))
-        # 乘以采样率，因此可以按样本点个数表示
+        # 乘以采样率并除以vector_size，因此可以表示采样后每个vector对应的标签
 
-        tag = torch.zeros([self.chunk_size])
-        chunk_start = index * self.chunk_size
-        chunk_end = (index + 1) * self.chunk_size
+        tag = torch.zeros([self.chunk_size // self.vector_size])
+        chunk_start = index * self.split_size // self.vector_size
+        chunk_end = chunk_start + self.chunk_size // self.vector_size
         # 创建chunk的基础标签
 
         zipped = dict(zip(start, duration))
@@ -128,18 +129,24 @@ class FineTuneAudio(AudioDataset):
                 tag[:] = 1
         # 按照.csv中的开始和持续时长生成标签，处理重叠部分
 
-        return wf, tag
+        return wf, tag[None, :]
 
     def __init__(
-            self, sample_rate=8000,
+            self,
+            data_path: Union[Path, str], mark_path: Union[Path, str],
+            sample_rate=8000,
             split_size=4 * 60 * 8000, front_overlap=2 * 60 * 8000, back_overlap=2 * 60 * 8000,
-            data_path=Path("D:\\课程 2023暑假\\数据集\\"), data_suffix: Optional[str] = ".wav",
-            mark_path=Path(r"D:\课程 2023暑假\数据集\阿梓 标注"), sep="\t"
+            data_suffix: Optional[str] = ".wav",
+            sep="\t", vector_size=729
     ):
-        super().__init__(sample_rate, split_size, front_overlap, back_overlap, data_path, data_suffix)
+        data_path = Path(data_path)
+        mark_path = Path(mark_path)
+        super().__init__(sample_rate=sample_rate, split_size=split_size, front_overlap=front_overlap,
+                         back_overlap=back_overlap, data_path=data_path, data_suffix=data_suffix)
         self.mark_path = mark_path
         self.sep = sep
         self.tags = []
+        self.vector_size = vector_size
         for path in scanner(mark_path):
             if mark_path.suffix == ".csv":
                 mark_file = pd.read_csv(mark_path, sep=sep, )
@@ -159,9 +166,4 @@ class FineTuneAudio(AudioDataset):
                 self.tags.append((path, tag))
 
     def times_rate(self, x):
-        return int(x * self.sample_rate)
-
-
-if __name__ == '__main__':
-    audio = FineTuneAudio(data_path=Path(r"D:\课程 2023暑假\数据集\阿梓 标注\temp"))
-    print(audio[0])
+        return int(x * self.sample_rate // self.vector_size)
