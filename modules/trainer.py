@@ -309,7 +309,7 @@ class SlicerTrainer(Trainer):
             self, *args,
             print_interval=10,
             val_interval=100,
-            save_interval=1000,
+            save_interval=2000,
             **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -317,7 +317,7 @@ class SlicerTrainer(Trainer):
         self.val_interval = val_interval
         self.save_interval = save_interval
 
-    def train(self, start_step=None):  # TODO: 针对fine-tune的代码
+    def train(self, start_step=None):
         step = start_step
         if start_step is None:
             step = self.start_step
